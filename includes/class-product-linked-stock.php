@@ -54,7 +54,10 @@ class Product_Linked_Stock {
 	 */
 	protected static $instance = null;
 
-  protected $cart_quantities_msg=array();
+    protected $cart_quantities_msg=array();
+
+    protected $filters=array();
+
 	/**
 	 * Initialize the plugin by setting localization and loading public scripts
 	 * and styles.
@@ -63,7 +66,7 @@ class Product_Linked_Stock {
 	 */
 
 	private function __construct() {
-    require_once( plugin_dir_path( __FILE__ ) . 'class-wc-product-linked-stock.php' );
+        require_once( plugin_dir_path( __FILE__ ) . 'class-wc-product-linked-stock.php' );
 
 		// Load plugin text domain
 		add_action( 'init', array( $this, 'load_plugin_textdomain' ) );
@@ -72,26 +75,117 @@ class Product_Linked_Stock {
 		add_action( 'wpmu_new_blog', array( $this, 'activate_new_site' ) );
 
 		// Load public-facing style sheet and JavaScript.
-    /*
-    add_action( 'wp_enqueue_scripts', array( $this, 'enqueue_styles' ) );
-		add_action( 'wp_enqueue_scripts', array( $this, 'enqueue_scripts' ) );
-    */
+        /*
+          add_action( 'wp_enqueue_scripts', array( $this, 'enqueue_styles' ) );
+          add_action( 'wp_enqueue_scripts', array( $this, 'enqueue_scripts' ) );
+        */
 
-		add_action( 'woocommerce_process_product_meta_linked_stock', array( $this, 'process_meta' ) );
+		add_action( 'woocommerce_process_product_meta_linked_stock', array( $this, 'process_meta' ),1,1 );
+
+
+        add_action('woocommerce_product_options_stock',array( $this, 'product_options_stock' ));
+        add_action('woocommerce_product_options_stock_fields',array( $this, 'product_options_stock_fields' ));
+        add_action('woocommerce_product_options_general_product_data',array( $this, 'product_options_general_product_data' ));
+
+
+        add_action('woocommerce_email',array($this,'register_notification_hooks'),10,1);
+
+
 		//add_action( 'woocommerce_check_cart_items', array( $this, 'check_cart_stock' ),1 );
 
-    // Allows the selection of the 'bundled product' type
-    add_filter( 'product_type_selector', array( $this, 'product_selector_filter' ) );
-    add_filter( 'woocommerce_product_data_tabs', array( $this, 'product_data_tabs' ) );
-    add_filter( 'woocommerce_linked_stock_add_to_cart', 'woocommerce_variable_add_to_cart' );
-    add_filter( 'woocommerce_product_class', array( $this, 'product_class'),10,4);
-    add_filter( 'woocommerce_add_to_cart_handler', array( $this, 'add_to_cart_handler'));
-    add_filter( 'woocommerce_add_to_cart_validation', array( $this, 'add_to_cart_validation'),10,4); 
-    add_filter( 'woocommerce_update_cart_validation', array( $this, 'update_cart_validation'),10,4);
-    add_filter( 'woocommerce_update_cart_action_cart_updated',  array( $this, 'check_cart_stock'));
+        // Allows the selection of the 'bundled product' type
+        add_filter( 'product_type_selector', array( $this, 'product_selector_filter' ) );
+        add_filter( 'woocommerce_product_data_tabs', array( $this, 'product_data_tabs' ) );
+        add_filter( 'woocommerce_linked_stock_add_to_cart', 'woocommerce_variable_add_to_cart' );
+        add_filter( 'woocommerce_product_class', array( $this, 'product_class'),10,4);
+        add_filter( 'woocommerce_add_to_cart_handler', array( $this, 'add_to_cart_handler'));
+        add_filter( 'woocommerce_add_to_cart_validation', array( $this, 'add_to_cart_validation'),10,4); 
+        add_filter( 'woocommerce_update_cart_validation', array( $this, 'update_cart_validation'),10,4);
+        add_filter( 'woocommerce_update_cart_action_cart_updated',  array( $this, 'check_cart_stock'));
 
 	}
 
+    public function register_notification_hooks($WC_Email){
+        global $wp_filter;
+
+/*
+		remove_action( 'woocommerce_low_stock_notification', array( $WC_Email, 'low_stock' ) );
+		remove_action( 'woocommerce_no_stock_notification', array( $WC_EMail, 'no_stock' ) );
+*/
+        //Should be a better way of doing this but remove all actions registered
+        //for low or no stock so we we can trigger them later
+        $this->filters['no_stock']=$wp_filter['woocommerce_no_stock_notification'];
+        $this->filters['low_stock']=$wp_filter['woocommerce_low_stock_notification'];
+
+        $wp_filter['woocommerce_no_stock_notification']=array();
+        $wp_filter['woocommerce_low_stock_notification']=array();
+
+        //TODO: Decide what to do about the back order action. Seems reasonable that people
+        //Should be able to back order variations if out of stock rather than linking to the 
+        //parent product
+        
+		add_action( 'woocommerce_after_send_stock_notifications', array( $this, 'send_stock_notifications' ),10,3 );
+    }
+
+    public function send_stock_notifications($product, $new_stock, $qty_ordered){
+        global $wp_filter;
+        
+        $prod=$product;
+
+        $stock_check=$new_stock;
+        
+        if($prod instanceof WC_Product_Linked_Stock_Variation){
+            $stock_check=$prod->parent->get_total_stock();
+            $prod=$prod->parent;
+        }
+
+        $wp_filter['woocommerce_no_stock_notification']=$this->filters['no_stock'];
+        $wp_filter['woocommerce_low_stock_notification']=$this->filters['low_stock'];
+
+        // stock status notifications
+		$notification_sent = false;
+
+		if ( 'yes' == get_option( 'woocommerce_notify_no_stock' ) && get_option( 'woocommerce_notify_no_stock_amount' ) >= $stock_check ) {
+			do_action( 'woocommerce_no_stock', $prod );
+			$notification_sent = true;
+		}
+
+		if ( ! $notification_sent && 'yes' == get_option( 'woocommerce_notify_low_stock' ) && get_option( 'woocommerce_notify_low_stock_amount' ) >= $stock_check ) {
+			do_action( 'woocommerce_low_stock', $prod );
+		}
+
+        $this->filters['no_stock']=$wp_filter['woocommerce_no_stock'];
+        $this->filters['low_stock']=$wp_filter['woocommerce_low_stock'];
+
+        $wp_filter['woocommerce_no_stock_notification']=array();
+        $wp_filter['woocommerce_low_stock_notification']=array();
+    }
+    
+    public function product_options_general_product_data(){
+        //Shouldn't do this here, but it needs to happen before the product check box
+        global $post;
+        if(isset($post->ID)){
+            $p=get_product($post->ID);
+            if($p->product_type=='linked_stock'){
+                update_post_meta( $post->ID, '_manage_stock', 'yes' );
+            }
+        }
+    }
+
+    public function product_options_stock(){
+        ob_start();
+    }
+
+    //This is pretty nasty, but I can't see how else to change this HTML
+    public function product_options_stock_fields(){
+        ob_end_clean();
+
+        echo '<div class="stock_fields show_if_simple show_if_variable show_if_linked_stock">';
+        // Stock
+        woocommerce_wp_text_input( array( 'id' => '_stock', 'label' => __( 'Stock Qty', 'woocommerce' ), 'desc_tip' => true, 'description' => __( 'Stock quantity. If this is a variable product this value will be used to control stock for all variations, unless you define stock at variation level.', 'woocommerce' ), 'type' => 'number', 'custom_attributes' => array(
+            'step' 	=> 'any'
+        )  ) );
+    }
 	/**
 	 * Return the plugin slug.
 	 *
@@ -299,105 +393,114 @@ class Product_Linked_Stock {
 	 * @since    1.0.0
 	 */
 	public function product_selector_filter($options) {
-    $options['linked_stock'] = __( 'Variable (Linked Stock)', 'product-linked-stock' );
-    return $options;
+        $options['linked_stock'] = __( 'Variable (Linked Stock)', 'product-linked-stock' );
+        return $options;
 	}
 
 	public function product_data_tabs($tabs) {
-    $tabs['inventory']['class'][] = 'show_if_linked_stock';
-    $tabs['variations']['class'][] = 'show_if_linked_stock';
-    return $tabs;
+        $tabs['inventory']['class'][] = 'show_if_linked_stock';
+        $tabs['variations']['class'][] = 'show_if_linked_stock';
+        return $tabs;
 	}
 
 	public function process_meta($post_id) {
-    $_POST['variable_stock']=array(); //Remove any stock quantities at the variation level
-    WC_Meta_Box_Product_Data::save_variations( $post_id, null ); //Doesn't use the post object so we pass in null.
+        $_POST['variable_stock']=array(); //Remove any stock quantities at the variation level
+        $variable_post_id=$_POST['variable_post_id'];
+        $max_loop = max( array_keys( $_POST['variable_post_id'] ) );
+        for ( $i = 0; $i <= $max_loop; $i ++ ) {
+            if ( ! isset( $variable_post_id[ $i ] ) )
+                continue;
+            $variation_id = absint( $variable_post_id[ $i ] );
+            //update_post_meta( $variation_id, '_stock', '' );
+        }
+
+        WC_Meta_Box_Product_Data::save_variations( $post_id, null ); //Doesn't use the post object so we pass in null.
 	}
 
-  public function product_class( $classname, $product_type, $post_type, $product_id ){
-    $cls=$classname;
-    if($product_type=='variation'){
-      $terms=get_the_terms(wp_get_post_parent_id( $product_id ),'product_type');
-      if(!empty($terms) && isset( current( $terms )->name ) && sanitize_title( current( $terms )->name )=='linked_stock'){
-        $cls='WC_Product_Linked_Stock_Variation';
-      } 
-    }
-    return $cls;
-  }
-
-
-  public function check_cart_items() {
-    $result = $this->check_cart_item_validity();
-
-    if ( is_wp_error( $result ) ) {
-      wc_add_notice( $result->get_error_message(), 'error' );
-    }
-
-    // Check item stock
-    $result = $this->check_cart_item_stock();
-
-    if ( is_wp_error( $result ) ) { 
-      wc_add_notice( $result->get_error_message(), 'error' );
-    }
-  }
-
-  public function add_to_cart_handler($product_type){
-    if($product_type=='linked_stock'){
-      return 'variable';
-    }
-    return $product_type;
-  }
-
-  public function add_to_cart_validation($valid, $product_id, $quantity, $variation_id){
-    $p=get_product($product_id);
-    if($p->product_type=='linked_stock'){
-      $v=get_product($variation_id);
-      $units=0;
-      foreach(WC()->cart->get_cart() as $key=>$values){
-        if($values['product_id']==$product_id){
-          $units+=get_product($values['variation_id'])->get_unit_stock($values['quantity']);
+    public function product_class( $classname, $product_type, $post_type, $product_id ){
+        $cls=$classname;
+        if($product_type=='variation'){
+            $terms=get_the_terms(wp_get_post_parent_id( $product_id ),'product_type');
+            if(!empty($terms) && isset( current( $terms )->name ) && sanitize_title( current( $terms )->name )=='linked_stock'){
+                $cls='WC_Product_Linked_Stock_Variation';
+            } 
         }
-      }
-      if($units+$v->get_unit_stock($quantity)>$p->get_total_stock()){
-        wc_add_notice( sprintf(__( 'Sorry, we do not have enough "%s" in stock to fulfill your order. We apologise for any inconvenience caused.', 'woocommerce' ), $p->get_title()) ,'error' );
-        return false;
-      }
+        return $cls;
     }
-    return true;
-  }
 
 
-  public function check_cart_stock($valid){
-    foreach($this->cart_quantities_msg as $l=>$msg){
-      wc_add_notice($msg,'error');
-      $valid=false;
+    public function check_cart_items() {
+        $result = $this->check_cart_item_validity();
+
+        if ( is_wp_error( $result ) ) {
+            wc_add_notice( $result->get_error_message(), 'error' );
+        }
+
+        // Check item stock
+        $result = $this->check_cart_item_stock();
+
+        if ( is_wp_error( $result ) ) { 
+            wc_add_notice( $result->get_error_message(), 'error' );
+        }
     }
-    $this->cart_quantities_msg=array();
-    return $valid;
-  }
 
-  public function update_cart_validation( $valid, $cart_item_key, $val, $quantity ){
-    $quantities=array();
+    public function add_to_cart_handler($product_type){
+        if($product_type=='linked_stock'){
+            return 'variable';
+        }
+        return $product_type;
+    }
 
-    $item=get_product($val['product_id']);
-    if($item->product_type=='linked_stock'){
-      foreach(WC()->cart->get_cart() as $key=>$values){
-        $p=get_product($values['product_id']);
+    public function add_to_cart_validation($valid, $product_id, $quantity, $variation_id=''){
+        $p=get_product($product_id);
         if($p->product_type=='linked_stock'){
-          $v=get_product($values['variation_id']);
-          $units=$v->get_unit_stock(($val['variation_id']==$values['variation_id']?$quantity:$values['quantity']));
-          if(isset($quantities[$values['product_id']])){
-            $quantities[$values['product_id']]+=$units;
-          }else{
-            $quantities[$values['product_id']]=$units;
-          }
+            $v=get_product($variation_id);
+            $units=0;
+            foreach(WC()->cart->get_cart() as $key=>$values){
+                if($values['product_id']==$product_id){
+                    $units+=get_product($values['variation_id'])->get_unit_stock($values['quantity']);
+                }
+            }
+            if($units+$v->get_unit_stock($quantity)>$p->get_total_stock()){
+                wc_add_notice( sprintf(__( 'Sorry, we do not have enough "%s" in stock to fulfill your order. We apologise for any inconvenience caused.', 'woocommerce' ), $p->get_title()) ,'error' );
+                return false;
+            }
         }
-      }
-      if($quantities[$val['product_id']]>$item->get_total_stock()){
-        $this->cart_quantities_msg[$val['product_id']]= sprintf(__( 'Sorry, we do not have enough "%s" in stock to fulfill your order. Please edit your cart and try again. We apologise for any inconvenience caused.', 'woocommerce' ), $p->get_title() );
-        $valid=false;
-      }
+        return true;
     }
-    return $valid;
-  }
+
+
+    public function check_cart_stock($valid){
+        foreach($this->cart_quantities_msg as $l=>$msg){
+            wc_add_notice($msg,'error');
+            $valid=false;
+        }
+        $this->cart_quantities_msg=array();
+        return $valid;
+    }
+
+    public function update_cart_validation( $valid, $cart_item_key, $val, $quantity ){
+        $quantities=array();
+
+        $item=get_product($val['product_id']);
+        if($item->product_type=='linked_stock'){
+            foreach(WC()->cart->get_cart() as $key=>$values){
+                $p=get_product($values['product_id']);
+                if($p->product_type=='linked_stock'){
+                    $v=get_product($values['variation_id']);
+                    $units=$v->get_unit_stock(($val['variation_id']==$values['variation_id']?$quantity:$values['quantity']));
+                    if(isset($quantities[$values['product_id']])){
+                        $quantities[$values['product_id']]+=$units;
+                    }else{
+                        $quantities[$values['product_id']]=$units;
+                    }
+                }
+            }
+            if($quantities[$val['product_id']]>$item->get_total_stock()){
+                $this->cart_quantities_msg[$val['product_id']]= sprintf(__( 'Sorry, we do not have enough "%s" in stock to fulfill your order. Please edit your cart and try again. We apologise for any inconvenience caused.', 'woocommerce' ), $p->get_title() );
+                $valid=false;
+            }
+        }
+        return $valid;
+    }
 }
